@@ -270,7 +270,7 @@ int shox96_0_2_compress(const char *in, int len, char *out, struct lnk_lst *prev
       if (c_in == 0 && state == SHX_STATE_2)
         ol = append_bits(out, ol, 15232, 11, state);
       else
-        ol = append_bits(out, ol, c_95[c_in], l_95[c_in], state);
+        ol = append_bits(out, ol, c_95[(unsigned char)c_in], l_95[(unsigned char)c_in], state);
     } else
     if (c_in == 13 && c_next == 10) {
       ol = append_bits(out, ol, 13824, 9, state);
@@ -382,7 +382,7 @@ int shox96_0_2_decompress(const char *in, int len, char *out, struct lnk_lst *pr
   out[ol] = 0;
   while (bit_no < len) {
     int h, v;
-    char c;
+    char c = 0;
     byte is_upper = is_all_upper;
     int orig_bit_no = bit_no;
     v = getCodeIdx(vcode, in, len, &bit_no);

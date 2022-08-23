@@ -16,16 +16,22 @@
 #include <sqlite3.h>
 #include <esp_spi_flash.h>
 #include <esp_system.h>
+#include <esp_log.h>
 #include <rom/ets_sys.h>
 #include <sys/stat.h>
 
-#include "shox96_0_2.h"
+#ifndef USE_SHOX96
+#define USE_SHOX96 0
+#endif
 
-#undef dbg_printf
-//#define dbg_printf(...) printf(__VA_ARGS__)
-#define dbg_printf(...) 
-#define CACHEBLOCKSZ 64
-#define esp32_DEFAULT_MAXNAMESIZE 100
+#if USE_SHOX96
+#include "shox96_0_2.h"
+#endif
+
+#define CACHEBLOCKSZ  64
+#define MAX_NAME_SIZE 100
+
+static const char TAG[]="sqlite3";
 
 // From https://stackoverflow.com/questions/19758270/read-varint-from-linux-sockets#19760246
 // Encode an unsigned 64-bit varint.  Returns number of encoded bytes.
@@ -54,108 +60,108 @@ uint64_t decode_unsigned_varint(const uint8_t *data, int *decoded_bytes) {
 	return decoded_value;
 }
 
-int esp32_Close(sqlite3_file*);
-int esp32_Lock(sqlite3_file *, int);
-int esp32_Unlock(sqlite3_file*, int);
-int esp32_Sync(sqlite3_file*, int);
-int esp32_Open(sqlite3_vfs*, const char *, sqlite3_file *, int, int*);
-int esp32_Read(sqlite3_file*, void*, int, sqlite3_int64);
-int esp32_Write(sqlite3_file*, const void*, int, sqlite3_int64);
-int esp32_Truncate(sqlite3_file*, sqlite3_int64);
-int esp32_Delete(sqlite3_vfs*, const char *, int);
-int esp32_FileSize(sqlite3_file*, sqlite3_int64*);
-int esp32_Access(sqlite3_vfs*, const char*, int, int*);
-int esp32_FullPathname( sqlite3_vfs*, const char *, int, char*);
-int esp32_CheckReservedLock(sqlite3_file*, int *);
-int esp32_FileControl(sqlite3_file *, int, void*);
-int esp32_SectorSize(sqlite3_file*);
-int esp32_DeviceCharacteristics(sqlite3_file*);
-void* esp32_DlOpen(sqlite3_vfs*, const char *);
-void esp32_DlError(sqlite3_vfs*, int, char*);
-void (*esp32_DlSym (sqlite3_vfs*, void*, const char*))(void);
-void esp32_DlClose(sqlite3_vfs*, void*);
-int esp32_Randomness(sqlite3_vfs*, int, char*);
-int esp32_Sleep(sqlite3_vfs*, int);
-int esp32_CurrentTime(sqlite3_vfs*, double*);
-
-int esp32mem_Close(sqlite3_file*);
-int esp32mem_Read(sqlite3_file*, void*, int, sqlite3_int64);
-int esp32mem_Write(sqlite3_file*, const void*, int, sqlite3_int64);
-int esp32mem_FileSize(sqlite3_file*, sqlite3_int64*);
-int esp32mem_Sync(sqlite3_file*, int);
-
-typedef struct st_linkedlist {
+typedef struct linkedlist_s {
 	uint16_t blockid;
-	struct st_linkedlist *next;
+	struct linkedlist_s *next;
 	uint8_t data[CACHEBLOCKSZ];
 } linkedlist_t, *pLinkedList_t;
 
-typedef struct st_filecache {
+typedef struct filecache_s {
 	uint32_t size;
 	linkedlist_t *list;
 } filecache_t, *pFileCache_t;
 
-typedef struct esp32_file {
+typedef struct vfsFile_s {
 	sqlite3_file base;
 	FILE *fd;
 	filecache_t *cache;
-	char name[esp32_DEFAULT_MAXNAMESIZE];
-} esp32_file;
+	char name[MAX_NAME_SIZE];
+} vfsFile_t;
 
-sqlite3_vfs  esp32Vfs = {
-	1,			// iVersion
-	sizeof(esp32_file),	// szOsFile
-	101,	// mxPathname
-	NULL,			// pNext
-	"esp32",		// name
-	0,			// pAppData
-	esp32_Open,		// xOpen
-	esp32_Delete,		// xDelete
-	esp32_Access,		// xAccess
-	esp32_FullPathname,	// xFullPathname
-	esp32_DlOpen,		// xDlOpen
-	esp32_DlError,	// xDlError
-	esp32_DlSym,		// xDlSym
-	esp32_DlClose,	// xDlClose
-	esp32_Randomness,	// xRandomness
-	esp32_Sleep,		// xSleep
-	esp32_CurrentTime,	// xCurrentTime
-	0			// xGetLastError
+static int vfsClose(sqlite3_file*);
+static int vfsLock(sqlite3_file*, int);
+static int vfsUnlock(sqlite3_file*, int);
+static int vfsSync(sqlite3_file*, int);
+static int vfsOpen(sqlite3_vfs*, const char*, sqlite3_file*, int, int*);
+static int vfsRead(sqlite3_file*, void*, int, sqlite3_int64);
+static int vfsWrite(sqlite3_file*, const void*, int, sqlite3_int64);
+static int vfsTruncate(sqlite3_file*, sqlite3_int64);
+static int vfsDelete(sqlite3_vfs*, const char*, int);
+static int vfsFileSize(sqlite3_file*, sqlite3_int64*);
+static int vfsAccess(sqlite3_vfs*, const char*, int, int*);
+static int vfsFullPathname(sqlite3_vfs*, const char*, int, char*);
+static int vfsCheckReservedLock(sqlite3_file*, int*);
+static int vfsFileControl(sqlite3_file*, int, void*);
+static int vfsSectorSize(sqlite3_file*);
+static int vfsDeviceCharacteristics(sqlite3_file*);
+static int vfsRandomness(sqlite3_vfs*, int, char*);
+static int vfsSleep(sqlite3_vfs*, int);
+static int vfsCurrentTime(sqlite3_vfs*, double*);
+static int vfsMemClose(sqlite3_file*);
+static int vfsMemRead(sqlite3_file*, void*, int, sqlite3_int64);
+static int vfsMemWrite(sqlite3_file*, const void*, int, sqlite3_int64);
+static int vfsMemFileSize(sqlite3_file*, sqlite3_int64*);
+static int vfsMemSync(sqlite3_file*, int);
+static void* vfsDlOpen(sqlite3_vfs*, const char*);
+static void vfsDlError(sqlite3_vfs*, int, char*);
+static void vfsDlClose(sqlite3_vfs*, void*);
+
+void (*vfsDlSym(sqlite3_vfs*, void*, const char*))(void);
+
+static sqlite3_vfs esp32Vfs = {
+	.iVersion = 1,			/* Structure version number (maximum 3)  */
+	.szOsFile = sizeof(vfsFile_t),	/* Size of subclassed sqlite3_file */
+	.mxPathname = (1 + (MAX_NAME_SIZE)), /* Maximum file pathname length */
+	.pNext = NULL,			/* Next registered VFS */
+	.zName = "esp32",		/* Name of this virtual file system */
+	.pAppData = 0,			/* Pointer to application-specific data */
+    .xOpen = vfsOpen,
+    .xDelete = vfsDelete,
+    .xAccess = vfsAccess,
+    .xFullPathname = vfsFullPathname,
+    .xDlOpen = vfsDlOpen,
+    .xDlError = vfsDlError,
+    .xDlSym = vfsDlSym,
+    .xDlClose = vfsDlClose,
+    .xRandomness = vfsRandomness,
+    .xSleep = vfsSleep,
+    .xCurrentTime = vfsCurrentTime,
+	.xGetLastError = NULL
 };
 
-const sqlite3_io_methods esp32IoMethods = {
-	1,
-	esp32_Close,
-	esp32_Read,
-	esp32_Write,
-	esp32_Truncate,
-	esp32_Sync,
-	esp32_FileSize,
-	esp32_Lock,
-	esp32_Unlock,
-	esp32_CheckReservedLock,
-	esp32_FileControl,
-	esp32_SectorSize,
-	esp32_DeviceCharacteristics
+static sqlite3_io_methods esp32IoMethods = {
+	.iVersion = 1,
+    .xClose = vfsClose,
+    .xRead = vfsRead,
+    .xWrite = vfsWrite,
+    .xTruncate = vfsTruncate,
+    .xSync = vfsSync,
+    .xFileSize = vfsFileSize,
+    .xLock = vfsLock,
+    .xUnlock = vfsUnlock,
+    .xCheckReservedLock = vfsCheckReservedLock,
+    .xFileControl = vfsFileControl,
+    .xSectorSize = vfsSectorSize,
+    .xDeviceCharacteristics = vfsDeviceCharacteristics,
 };
 
-const sqlite3_io_methods esp32MemMethods = {
-	1,
-	esp32mem_Close,
-	esp32mem_Read,
-	esp32mem_Write,
-	esp32_Truncate,
-	esp32mem_Sync,
-	esp32mem_FileSize,
-	esp32_Lock,
-	esp32_Unlock,
-	esp32_CheckReservedLock,
-	esp32_FileControl,
-	esp32_SectorSize,
-	esp32_DeviceCharacteristics
+static sqlite3_io_methods esp32MemMethods = {
+	.iVersion = 1,
+    .xClose = vfsMemClose,
+    .xRead = vfsMemRead,
+    .xWrite = vfsMemWrite,
+    .xTruncate = vfsTruncate,
+    .xSync = vfsMemSync,
+    .xFileSize = vfsMemFileSize,
+    .xLock = vfsLock,
+    .xUnlock = vfsUnlock,
+    .xCheckReservedLock = vfsCheckReservedLock,
+    .xFileControl = vfsFileControl,
+    .xSectorSize = vfsSectorSize,
+    .xDeviceCharacteristics = vfsDeviceCharacteristics,
 };
 
-uint32_t linkedlist_store (linkedlist_t **leaf, uint32_t offset, uint32_t len, const uint8_t *data) {
+static uint32_t linkedlist_store (linkedlist_t **leaf, uint32_t offset, uint32_t len, const uint8_t *data) {
 	const uint8_t blank[CACHEBLOCKSZ] = { 0 };
 	uint16_t blockid = offset/CACHEBLOCKSZ;
 	linkedlist_t *block;
@@ -191,7 +197,7 @@ uint32_t linkedlist_store (linkedlist_t **leaf, uint32_t offset, uint32_t len, c
 	return len;
 }
 
-uint32_t filecache_pull (pFileCache_t cache, uint32_t offset, uint32_t len, uint8_t *data) {
+static uint32_t filecache_pull (pFileCache_t cache, uint32_t offset, uint32_t len, uint8_t *data) {
 	uint16_t i;
 	float blocks;
 	uint32_t r = 0;
@@ -236,7 +242,7 @@ uint32_t filecache_pull (pFileCache_t cache, uint32_t offset, uint32_t len, uint
 	return 0;
 }
 
-uint32_t filecache_push (pFileCache_t cache, uint32_t offset, uint32_t len, const uint8_t *data) {
+static uint32_t filecache_push (pFileCache_t cache, uint32_t offset, uint32_t len, const uint8_t *data) {
 	uint16_t i;
 	float blocks;
 	uint32_t r = 0;
@@ -287,9 +293,9 @@ uint32_t filecache_push (pFileCache_t cache, uint32_t offset, uint32_t len, cons
 	return r;
 }
 
-void filecache_free (pFileCache_t cache) {
-	pLinkedList_t ll = cache->list, next;
-
+static void filecache_free (pFileCache_t cache) {
+	linkedlist_t* next = NULL;
+    linkedlist_t* ll = cache->list;
 	while (ll != NULL) {
 		next = ll->next;
 		sqlite3_free (ll);
@@ -297,72 +303,82 @@ void filecache_free (pFileCache_t cache) {
 	}
 }
 
-int esp32mem_Close(sqlite3_file *id)
+static int vfsAccess(sqlite3_vfs* vfs, const char* path, int flags, int* result)
 {
-	esp32_file *file = (esp32_file*) id;
+    struct stat st;
+    memset(&st, 0, sizeof(struct stat));
+    int rc = stat(path, &st);
+    *result = (rc != -1);
+
+    ESP_LOGD(TAG, "vfsAccess: %s %d %d %ld\n", path, *result, rc, st.st_size);
+    return SQLITE_OK;
+}
+
+static int vfsMemClose(sqlite3_file *id)
+{
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	filecache_free(file->cache);
 	sqlite3_free (file->cache);
 
-	dbg_printf("esp32mem_Close: %s OK\n", file->name);
+	ESP_LOGD(TAG, "vfsMemClose: %s OK\n", file->name);
 	return SQLITE_OK;
 }
 
-int esp32mem_Read(sqlite3_file *id, void *buffer, int amount, sqlite3_int64 offset)
+static int vfsMemRead(sqlite3_file *id, void *buffer, int amount, sqlite3_int64 offset)
 {
 	int32_t ofst;
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 	ofst = (int32_t)(offset & 0x7FFFFFFF);
 
 	filecache_pull (file->cache, ofst, amount, (uint8_t *) buffer);
 
-	dbg_printf("esp32mem_Read: %s [%d] [%d] OK\n", file->name, ofst, amount);
+	ESP_LOGD(TAG, "vfsMemRead: %s [%d] [%d] OK\n", file->name, ofst, amount);
 	return SQLITE_OK;
 }
 
-int esp32mem_Write(sqlite3_file *id, const void *buffer, int amount, sqlite3_int64 offset)
+static int vfsMemWrite(sqlite3_file *id, const void *buffer, int amount, sqlite3_int64 offset)
 {
 	int32_t ofst;
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	ofst = (int32_t)(offset & 0x7FFFFFFF);
 
 	filecache_push (file->cache, ofst, amount, (const uint8_t *) buffer);
 
-	dbg_printf("esp32mem_Write: %s [%d] [%d] OK\n", file->name, ofst, amount);
+	ESP_LOGD(TAG, "vfsMemWrite: %s [%d] [%d] OK\n", file->name, ofst, amount);
 	return SQLITE_OK;
 }
 
-int esp32mem_Sync(sqlite3_file *id, int flags)
+static int vfsMemSync(sqlite3_file *id, int flags)
 {
-	esp32_file *file = (esp32_file*) id;
-	dbg_printf("esp32mem_Sync: %s OK\n", file->name);
+	vfsFile_t *file = (vfsFile_t*) id;
+	ESP_LOGD(TAG, "vfsMemSync: %s OK\n", file->name);
 	return  SQLITE_OK;
 }
 
-int esp32mem_FileSize(sqlite3_file *id, sqlite3_int64 *size)
+static int vfsMemFileSize(sqlite3_file *id, sqlite3_int64 *size)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	*size = 0LL | file->cache->size;
-	dbg_printf("esp32mem_FileSize: %s [%d] OK\n", file->name, file->cache->size);
+	ESP_LOGD(TAG, "vfsMemFileSize: %s [%d] OK\n", file->name, file->cache->size);
 	return SQLITE_OK;
 }
 
-int esp32_Open( sqlite3_vfs * vfs, const char * path, sqlite3_file * file, int flags, int * outflags )
+static int vfsOpen( sqlite3_vfs * vfs, const char * path, sqlite3_file * file, int flags, int * outflags )
 {
-	int rc;
 	char mode[5];
-	esp32_file *p = (esp32_file*) file;
+	vfsFile_t *p = (vfsFile_t*) file;
 
 	strcpy(mode, "r");
 	if ( path == NULL ) return SQLITE_IOERR;
-	dbg_printf("esp32_Open: 0o %s %s\n", path, mode);
+	ESP_LOGD(TAG, "vfsOpen: 0o %s %s\n", path, mode);
 	if( flags&SQLITE_OPEN_READONLY ) 
 		strcpy(mode, "r");
 	if( flags&SQLITE_OPEN_READWRITE || flags&SQLITE_OPEN_MAIN_JOURNAL ) {
 		int result;
-		if (SQLITE_OK != esp32_Access(vfs, path, flags, &result))
+		if (SQLITE_OK != vfsAccess(vfs, path, flags, &result))
 			return SQLITE_CANTOPEN;
 
 		if (result == 1)
@@ -371,11 +387,11 @@ int esp32_Open( sqlite3_vfs * vfs, const char * path, sqlite3_file * file, int f
             strcpy(mode, "w+");
 	}
 
-	dbg_printf("esp32_Open: 1o %s %s\n", path, mode);
-	memset (p, 0, sizeof(esp32_file));
+	ESP_LOGD(TAG, "vfsOpen: 1o %s %s\n", path, mode);
+	memset (p, 0, sizeof(vfsFile_t));
 
-    strncpy (p->name, path, esp32_DEFAULT_MAXNAMESIZE);
-	p->name[esp32_DEFAULT_MAXNAMESIZE-1] = '\0';
+    strncpy (p->name, path, MAX_NAME_SIZE);
+	p->name[MAX_NAME_SIZE-1] = '\0';
 
 	if( flags&SQLITE_OPEN_MAIN_JOURNAL ) {
 		p->fd = 0;
@@ -385,66 +401,66 @@ int esp32_Open( sqlite3_vfs * vfs, const char * path, sqlite3_file * file, int f
 		memset (p->cache, 0, sizeof(filecache_t));
 
 		p->base.pMethods = &esp32MemMethods;
-		dbg_printf("esp32_Open: 2o %s MEM OK\n", p->name);
+		ESP_LOGD(TAG, "vfsOpen: 2o %s MEM OK\n", p->name);
 		return SQLITE_OK;
 	}
 
 	p->fd = fopen(path, mode);
-    if ( p->fd <= 0 ) {
+    if ( p->fd == NULL ) {
 		return SQLITE_CANTOPEN;
 	}
 
 	p->base.pMethods = &esp32IoMethods;
-	dbg_printf("esp32_Open: 2o %s OK\n", p->name);
+	ESP_LOGD(TAG, "vfsOpen: 2o %s OK\n", p->name);
 	return SQLITE_OK;
 }
 
-int esp32_Close(sqlite3_file *id)
+static int vfsClose(sqlite3_file *id)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	int rc = fclose(file->fd);
-	dbg_printf("esp32_Close: %s %d\n", file->name, rc);
+	ESP_LOGD(TAG, "vfsClose: %s %d\n", file->name, rc);
 	return rc ? SQLITE_IOERR_CLOSE : SQLITE_OK;
 }
 
-int esp32_Read(sqlite3_file *id, void *buffer, int amount, sqlite3_int64 offset)
+static int vfsRead(sqlite3_file *id, void *buffer, int amount, sqlite3_int64 offset)
 {
 	size_t nRead;
 	int32_t ofst, iofst;
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	iofst = (int32_t)(offset & 0x7FFFFFFF);
 
-	dbg_printf("esp32_Read: 1r %s %d %lld[%d] \n", file->name, amount, offset, iofst);
+	ESP_LOGD(TAG, "vfsRead: 1r %s %d %lld[%d] \n", file->name, amount, offset, iofst);
 	ofst = fseek(file->fd, iofst, SEEK_SET);
 	if (ofst != 0) {
-	    dbg_printf("esp32_Read: 2r %d != %d FAIL\n", ofst, iofst);
+	    ESP_LOGD(TAG, "vfsRead: 2r %d != %d FAIL\n", ofst, iofst);
 		return SQLITE_IOERR_SHORT_READ /* SQLITE_IOERR_SEEK */;
 	}
 
 	nRead = fread(buffer, 1, amount, file->fd);
 	if ( nRead == amount ) {
-	    dbg_printf("esp32_Read: 3r %s %u %d OK\n", file->name, nRead, amount);
+	    ESP_LOGD(TAG, "vfsRead: 3r %s %u %d OK\n", file->name, nRead, amount);
 		return SQLITE_OK;
-	} else if ( nRead >= 0 ) {
-	    dbg_printf("esp32_Read: 3r %s %u %d FAIL\n", file->name, nRead, amount);
+	} else if ( nRead == 0 ) {
+	    ESP_LOGD(TAG, "vfsRead: 3r %s %u %d FAIL\n", file->name, nRead, amount);
 		return SQLITE_IOERR_SHORT_READ;
 	}
 
-	dbg_printf("esp32_Read: 4r %s FAIL\n", file->name);
+	ESP_LOGD(TAG, "vfsRead: 4r %s FAIL\n", file->name);
 	return SQLITE_IOERR_READ;
 }
 
-int esp32_Write(sqlite3_file *id, const void *buffer, int amount, sqlite3_int64 offset)
+static int vfsWrite(sqlite3_file *id, const void *buffer, int amount, sqlite3_int64 offset)
 {
 	size_t nWrite;
 	int32_t ofst, iofst;
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	iofst = (int32_t)(offset & 0x7FFFFFFF);
 
-	dbg_printf("esp32_Write: 1w %s %d %lld[%d] \n", file->name, amount, offset, iofst);
+	ESP_LOGD(TAG, "vfsWrite: 1w %s %d %lld[%d] \n", file->name, amount, offset, iofst);
 	ofst = fseek(file->fd, iofst, SEEK_SET);
 	if (ofst != 0) {
 		return SQLITE_IOERR_SEEK;
@@ -452,41 +468,41 @@ int esp32_Write(sqlite3_file *id, const void *buffer, int amount, sqlite3_int64 
 
 	nWrite = fwrite(buffer, 1, amount, file->fd);
 	if ( nWrite != amount ) {
-		dbg_printf("esp32_Write: 2w %s %u %d\n", file->name, nWrite, amount);
+		ESP_LOGD(TAG, "vfsWrite: 2w %s %u %d\n", file->name, nWrite, amount);
 		return SQLITE_IOERR_WRITE;
 	}
 
-	dbg_printf("esp32_Write: 3w %s OK\n", file->name);
+	ESP_LOGD(TAG, "vfsWrite: 3w %s OK\n", file->name);
 	return SQLITE_OK;
 }
 
-int esp32_Truncate(sqlite3_file *id, sqlite3_int64 bytes)
+static int vfsTruncate(sqlite3_file *id, sqlite3_int64 bytes)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 	//int fno = fileno(file->fd);
 	//if (fno == -1)
 	//	return SQLITE_IOERR_TRUNCATE;
 	//if (ftruncate(fno, 0))
 	//	return SQLITE_IOERR_TRUNCATE;
 
-	dbg_printf("esp32_Truncate:\n");
+	ESP_LOGD(TAG, "vfsTruncate: %s\n", file->name);
 	return SQLITE_OK;
 }
 
-int esp32_Delete( sqlite3_vfs * vfs, const char * path, int syncDir )
+static int vfsDelete( sqlite3_vfs * vfs, const char * path, int syncDir )
 {
 	int32_t rc = remove( path );
 	if (rc)
 		return SQLITE_IOERR_DELETE;
 
-	dbg_printf("esp32_Delete: %s OK\n", path);
+	ESP_LOGD(TAG, "vfsDelete: %s OK\n", path);
 	return SQLITE_OK;
 }
 
-int esp32_FileSize(sqlite3_file *id, sqlite3_int64 *size)
+static int vfsFileSize(sqlite3_file *id, sqlite3_int64 *size)
 {
-	esp32_file *file = (esp32_file*) id;
-	dbg_printf("esp32_FileSize: %s: ", file->name);
+	vfsFile_t *file = (vfsFile_t*) id;
+	ESP_LOGD(TAG, "vfsFileSize: %s: ", file->name);
 	struct stat st;
 	int fno = fileno(file->fd);
 	if (fno == -1)
@@ -494,33 +510,22 @@ int esp32_FileSize(sqlite3_file *id, sqlite3_int64 *size)
 	if (fstat(fno, &st))
 		return SQLITE_IOERR_FSTAT;
     *size = st.st_size;
-	dbg_printf(" %ld[%lld]\n", st.st_size, *size);
+	ESP_LOGD(TAG, " %ld[%lld]\n", st.st_size, *size);
 	return SQLITE_OK;
 }
 
-int esp32_Sync(sqlite3_file *id, int flags)
+static int vfsSync(sqlite3_file *id, int flags)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	int rc = fflush( file->fd );
         fsync(fileno(file->fd));
-        dbg_printf("esp32_Sync( %s: ): %d \n",file->name, rc);
+        ESP_LOGD(TAG, "vfsSync( %s: ): %d \n",file->name, rc);
 
 	return rc ? SQLITE_IOERR_FSYNC : SQLITE_OK;
 }
 
-int esp32_Access( sqlite3_vfs * vfs, const char * path, int flags, int * result )
-{
-	struct stat st;
-	memset(&st, 0, sizeof(struct stat));
-	int rc = stat( path, &st );
-	*result = ( rc != -1 );
-
-	dbg_printf("esp32_Access: %s %d %d %ld\n", path, *result, rc, st.st_size);
-	return SQLITE_OK;
-}
-
-int esp32_FullPathname( sqlite3_vfs * vfs, const char * path, int len, char * fullpath )
+static int vfsFullPathname( sqlite3_vfs * vfs, const char * path, int len, char * fullpath )
 {
 	//structure stat does not have name.
 	//struct stat st;
@@ -535,85 +540,85 @@ int esp32_FullPathname( sqlite3_vfs * vfs, const char * path, int len, char * fu
 	strncpy( fullpath, path, len );
 	fullpath[ len - 1 ] = '\0';
 
-	dbg_printf("esp32_FullPathname: %s\n", fullpath);
+	ESP_LOGD(TAG, "vfsFullPathname: %s\n", fullpath);
 	return SQLITE_OK;
 }
 
-int esp32_Lock(sqlite3_file *id, int lock_type)
+static int vfsLock(sqlite3_file *id, int lock_type)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
-	dbg_printf("esp32_Lock:Not locked\n");
+	ESP_LOGD(TAG, "vfsLock:Not locked %s", file->name);
 	return SQLITE_OK;
 }
 
-int esp32_Unlock(sqlite3_file *id, int lock_type)
+static int vfsUnlock(sqlite3_file *id, int lock_type)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
-	dbg_printf("esp32_Unlock:\n");
+	ESP_LOGD(TAG, "vfsUnlock: %s", file->name);
 	return SQLITE_OK;
 }
 
-int esp32_CheckReservedLock(sqlite3_file *id, int *result)
+static int vfsCheckReservedLock(sqlite3_file *id, int *result)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
 	*result = 0;
 
-	dbg_printf("esp32_CheckReservedLock:\n");
+	ESP_LOGD(TAG, "vfsCheckReservedLock: %s", file->name);
 	return SQLITE_OK;
 }
 
-int esp32_FileControl(sqlite3_file *id, int op, void *arg)
+static int vfsFileControl(sqlite3_file *id, int op, void *arg)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
-	dbg_printf("esp32_FileControl:\n");
+	ESP_LOGD(TAG, "vfsFileControl: %s", file->name);
 	return SQLITE_OK;
 }
 
-int esp32_SectorSize(sqlite3_file *id)
+static int vfsSectorSize(sqlite3_file *id)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
-	dbg_printf("esp32_SectorSize:\n");
+	ESP_LOGD(TAG, "vfsSectorSize: %s", file->name);
 	return SPI_FLASH_SEC_SIZE;
 }
 
-int esp32_DeviceCharacteristics(sqlite3_file *id)
+static int vfsDeviceCharacteristics(sqlite3_file *id)
 {
-	esp32_file *file = (esp32_file*) id;
+	vfsFile_t *file = (vfsFile_t*) id;
 
-	dbg_printf("esp32_DeviceCharacteristics:\n");
+	ESP_LOGD(TAG, "vfsDeviceCharacteristics: %s", file->name);
 	return 0;
 }
 
-void * esp32_DlOpen( sqlite3_vfs * vfs, const char * path )
+void * vfsDlOpen( sqlite3_vfs * vfs, const char * path )
 {
-	dbg_printf("esp32_DlOpen:\n");
+	ESP_LOGD(TAG, "vfsDlOpen: %s", path);
 	return NULL;
 }
 
-void esp32_DlError( sqlite3_vfs * vfs, int len, char * errmsg )
+void vfsDlError( sqlite3_vfs * vfs, int len, char * errmsg )
 {
-	dbg_printf("esp32_DlError:\n");
+	ESP_LOGD(TAG, "vfsDlError:\n");
 	return;
 }
 
-void ( * esp32_DlSym ( sqlite3_vfs * vfs, void * handle, const char * symbol ) ) ( void )
+void ( * vfsDlSym ( sqlite3_vfs * vfs, void * handle, const char * symbol ) ) ( void )
 {
-	dbg_printf("esp32_DlSym:\n");
+	ESP_LOGD(TAG, "vfsDlSym:\n");
 	return NULL;
 }
 
-void esp32_DlClose( sqlite3_vfs * vfs, void * handle )
+void vfsDlClose( sqlite3_vfs * vfs, void * handle )
 {
-	dbg_printf("esp32_DlClose:\n");
+	ESP_LOGD(TAG, "vfsDlClose:\n");
 	return;
 }
 
-int esp32_Randomness( sqlite3_vfs * vfs, int len, char * buffer )
+static int vfsRandomness( sqlite3_vfs * vfs, int len, char * buffer )
 {
 	long rdm;
 	int sz = 1 + (len / sizeof(long));
@@ -623,28 +628,29 @@ int esp32_Randomness( sqlite3_vfs * vfs, int len, char * buffer )
 		memcpy(a_rdm + sz * sizeof(long), &rdm, sizeof(long));
 	}
 	memcpy(buffer, a_rdm, len);
-	dbg_printf("esp32_Randomness\n");
+	ESP_LOGD(TAG, "vfsRandomness\n");
 	return SQLITE_OK;
 }
 
-int esp32_Sleep( sqlite3_vfs * vfs, int microseconds )
+static int vfsSleep( sqlite3_vfs * vfs, int microseconds )
 {
 	ets_delay_us(microseconds);
-	dbg_printf("esp32_Sleep:\n");
+	ESP_LOGD(TAG, "vfsSleep:\n");
 	return SQLITE_OK;
 }
 
-int esp32_CurrentTime( sqlite3_vfs * vfs, double * result )
+static int vfsCurrentTime( sqlite3_vfs * vfs, double * result )
 {
 	time_t t = time(NULL);
 	*result = t / 86400.0 + 2440587.5;
 	// This is stubbed out until we have a working RTCTIME solution;
 	// as it stood, this would always have returned the UNIX epoch.
 	//*result = 2440587.5;
-	dbg_printf("esp32_CurrentTime: %g\n", *result);
+	ESP_LOGD(TAG, "vfsCurrentTime: %g\n", *result);
 	return SQLITE_OK;
 }
 
+#if USE_SHOX96
 static void shox96_0_2c(sqlite3_context *context, int argc, sqlite3_value **argv) {
   int nIn, nOut;
   long int nOut2;
@@ -666,7 +672,7 @@ static void shox96_0_2c(sqlite3_context *context, int argc, sqlite3_value **argv
 }
 
 static void shox96_0_2d(sqlite3_context *context, int argc, sqlite3_value **argv) {
-  unsigned int nIn, nOut, rc;
+  unsigned int nIn, nOut;
   const unsigned char *inBuf;
   unsigned char *outBuf;
   long int nOut2;
@@ -695,18 +701,23 @@ static void shox96_0_2d(sqlite3_context *context, int argc, sqlite3_value **argv
   //}
 } 
 
-int registerShox96_0_2(sqlite3 *db, const char **pzErrMsg, const struct sqlite3_api_routines *pThunk) {
+static int registerShox96_0_2(struct sqlite3 *db, const char **pzErrMsg, const struct sqlite3_api_routines *pThunk) {
   sqlite3_create_function(db, "shox96_0_2c", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, 0, shox96_0_2c, 0, 0);
   sqlite3_create_function(db, "shox96_0_2d", 1, SQLITE_UTF8 | SQLITE_DETERMINISTIC, 0, shox96_0_2d, 0, 0);
   return SQLITE_OK;
 }
+#endif /* USE_SHOX96 */
 
-int sqlite3_os_init(void){
+int sqlite3_os_init(void)
+{
   sqlite3_vfs_register(&esp32Vfs, 1);
+#if USE_SHOX96  
   sqlite3_auto_extension((void (*)())registerShox96_0_2);
+#endif  
   return SQLITE_OK;
 }
 
-int sqlite3_os_end(void){
+int sqlite3_os_end(void)
+{
   return SQLITE_OK;
 }
